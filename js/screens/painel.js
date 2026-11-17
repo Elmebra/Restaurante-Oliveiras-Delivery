@@ -1,0 +1,295 @@
+// Painel do Dono: resumo financeiro, cardápio editável, preços, produtos, loja (Pix, WhatsApp, link do cliente) e dados.
+import { icons } from '../icons.js';
+import { money, esc, centsToInput, parseMoney, timeHM, dateBR, WEEK_ORDER, DAY_NAMES, DAY_SHORT } from '../util.js';
+import { CATS, PAGAMENTOS } from '../store.js';
+import { SIZES } from '../pricing.js';
+import { loadDemo } from '../demo.js';
+
+const COLORS = { marmitex: '#1f4a34', bebidas: '#2e6f9e' };
+const PERIODS = [['hoje', 'Hoje'], ['7d', '7 dias'], ['mes', 'Mês'], ['tudo', 'Tudo']];
+const TABS = [['resumo', 'Resumo'], ['cardapio', 'Cardápio'], ['precos', 'Preços'], ['produtos', 'Produtos'], ['loja', 'Loja online'], ['config', 'Dados']];
+const CAT_ICONS = [['bottle', 'Garrafa'], ['can', 'Lata'], ['glass', 'Copo'], ['bar', 'Barra'], ['candy', 'Bala']];
+
+function priceRow(label, path, value, hint = '') {
+  return `<div class="pricerow"><div class="lbl">${label}${hint ? `<span class="hint">${hint}</span>` : ''}</div>
+    <div class="money"><span>R$</span><input class="inp sm" inputmode="decimal" data-change="price" data-path="${path}" value="${centsToInput(value)}" aria-label="${esc(label)}"></div></div>`;
+}
+
+function resumo({ store, ui }) {
+  ui.period = ui.period || 'hoje';
+  const r = store.summary(ui.period);
+  const max = Math.max(1, ...Object.values(r.byCat));
+  const bars = Object.entries(CATS).map(([k, l]) => `<div class="bar-row"><div class="top"><span>${l}</span><b>${money(r.byCat[k])}</b></div>
+    <div class="bar"><i style="width:${Math.round((r.byCat[k] / max) * 100)}%;background:${COLORS[k]}"></i></div></div>`).join('');
+  const pays = Object.entries(PAGAMENTOS).map(([k, l]) => `<div class="line"><span>${l}</span><b>${money(r.byPagamento[k])}</b></div>`).join('');
+  const motos = r.motoboys.map((m) => `<div class="moto-row"><span class="pic">${icons.moto}</span><span class="grow"><div class="strong">${esc(m.nome)}</div><div class="muted">${m.viagens} viagem(ns)</div></span><b>${money(m.valor)}</b></div>`).join('');
+  return `<div class="tabs">${PERIODS.map(([k, l]) => `<button class="${ui.period === k ? 'on' : ''}" data-action="period" data-v="${k}">${l}</button>`).join('')}</div>
+    <div class="big-total"><div class="l">FATURAMENTO</div><div class="v">${money(r.total)}</div><div class="s">${r.nPedidos} pedido(s) · ${r.nOnline} pelo link online</div></div>
+    <div class="card"><div class="h2">Por categoria</div>${bars}</div>
+    <div class="card"><div class="h2">Por forma de pagamento</div>${pays}</div>
+    <div class="card"><div class="h2">Entregas e motoboys</div>
+      <div class="stat3"><div><div class="l">Taxas cobradas</div><div class="v">${money(r.taxas)}</div></div><div><div class="l">Custo motoboys</div><div class="v">${money(r.custoMotoboys)}</div></div><div><div class="l">Viagens</div><div class="v">${r.viagens}</div></div></div>
+      <div class="mt12">${motos || '<div class="muted">Nenhuma entrega concluída no período.</div>'}</div></div>
+    <div class="note">Taxas de entrega não entram no faturamento por categoria; o custo dos motoboys é mostrado à parte.</div>`;
+}
+
+function cardapio({ s, ui }) {
+  ui.day = ui.day || 'seg';
+  const m = s.menu[ui.day];
+  const row = (list, x) => `<div class="edit-row"><input class="inp sm" data-change="menuName" data-list="${list}" data-id="${x.id}" value="${esc(x.name)}" aria-label="Nome">
+    ${list === 'dishes' ? `<button class="tagbtn ${x.tipo === 'feijoada' ? 'on' : ''}" data-action="menuFei" data-id="${x.id}" title="Marque se este prato é feijoada (usa preços de feijoada)">feijoada</button>` : ''}
+    <button class="iconbtn" data-action="menuUp" data-list="${list}" data-id="${x.id}" aria-label="Subir">${icons.up}</button>
+    <button class="iconbtn" data-action="menuDown" data-list="${list}" data-id="${x.id}" aria-label="Descer">${icons.down}</button>
+    <button class="iconbtn danger" data-action="menuDel" data-list="${list}" data-id="${x.id}" aria-label="Remover">${icons.trash}</button></div>`;
+  const add = (list, ph) => `<div class="row mt8"><input class="inp sm" data-input="add_${list}" data-enter="menuAdd" data-list="${list}" placeholder="${ph}" value="${esc(ui['add_' + list] || '')}">
+    <button class="btn sm gold" data-action="menuAdd" data-list="${list}">${icons.plus}</button></div>`;
+  return `<div class="days">${WEEK_ORDER.map((k) => `<button class="${ui.day === k ? 'on' : ''}" data-action="menuDay" data-v="${k}">${DAY_SHORT[k]}</button>`).join('')}</div>
+    <div class="card"><div class="h2">Pratos de ${DAY_NAMES[ui.day]}</div>${m.dishes.map((x) => row('dishes', x)).join('') || '<div class="muted">Nenhum prato.</div>'}${add('dishes', 'Novo prato')}</div>
+    <div class="card"><div class="h2">Acompanhamentos</div>${m.acomp.map((x) => row('acomp', x)).join('') || '<div class="muted">Nenhum acompanhamento.</div>'}${add('acomp', 'Novo acompanhamento')}</div>
+    <div class="card flat"><div class="strong mb8">Copiar cardápio de outro dia para ${DAY_NAMES[ui.day]}</div>
+      <select class="sel sm" data-change="menuCopy"><option value="">Escolha o dia…</option>${WEEK_ORDER.filter((k) => k !== ui.day).map((k) => `<option value="${k}">${DAY_NAMES[k]}</option>`).join('')}</select></div>
+    <div class="note blue mt12">Pratos marcados como <b>feijoada</b> usam os preços da feijoada (individual ou separada) na hora do pedido.</div>`;
+}
+
+function precos({ s }) {
+  const p = s.prices;
+  return `<div class="card"><div class="h2">Marmitex</div>${['P', 'M', 'G'].map((z) => priceRow(SIZES[z], `marmitex.${z}`, p.marmitex[z])).join('')}</div>
+    <div class="card"><div class="h2">Feijoada individual</div>${['M', 'G'].map((z) => priceRow(SIZES[z], `feijoada.individual.${z}`, p.feijoada.individual[z])).join('')}
+      <div class="h2 mt12">Feijoada separada</div>${['M', 'G'].map((z) => priceRow(SIZES[z], `feijoada.separada.${z}`, p.feijoada.separada[z])).join('')}</div>
+    <div class="card"><div class="h2">Entrega</div>${priceRow('Taxa de entrega padrão', 'entrega.taxaPadrao', p.entrega.taxaPadrao, 'Cobrada em todo pedido online com entrega')}
+      ${priceRow('Pagamento ao motoboy por viagem', 'entrega.pagamentoMotoboy', p.entrega.pagamentoMotoboy, 'Base do custo por motoboy')}</div>
+    <div class="note">Pedidos e pesagens já lançados mantêm o preço da época; mudanças valem para os próximos.</div>`;
+}
+
+function produtos({ s, ui }) {
+  const row = (p) => `<div class="card flat"><div class="edit-row"><input class="inp sm" data-change="prodName" data-id="${p.id}" value="${esc(p.name)}" aria-label="Nome">
+      <button class="iconbtn danger" data-action="prodDel" data-id="${p.id}" aria-label="Remover">${icons.trash}</button></div>
+    <div class="row"><div class="money grow"><span>R$</span><input class="inp sm" inputmode="decimal" data-change="prodPrice" data-id="${p.id}" value="${centsToInput(p.price)}" aria-label="Preço"></div>
+      <select class="sel sm" style="width:auto" data-change="prodGrupo" data-id="${p.id}"><option value="bebida" ${p.grupo === 'bebida' ? 'selected' : ''}>Bebida</option><option value="doce" ${p.grupo === 'doce' ? 'selected' : ''}>Doce</option></select></div></div>`;
+  ui.np = ui.np || { name: '', price: '', grupo: 'bebida', cat: 'bottle' };
+  return `${s.products.map(row).join('')}
+    <div class="card gold"><div class="h2">Novo produto</div>
+      <input class="inp mb8" data-input="npName" placeholder="Nome (ex.: Água 500ml)" value="${esc(ui.np.name)}">
+      <div class="row mb8"><div class="money grow"><span>R$</span><input class="inp" inputmode="decimal" data-input="npPrice" placeholder="0,00" value="${esc(ui.np.price)}"></div>
+      <select class="sel" style="width:auto" data-change="npGrupo"><option value="bebida" ${ui.np.grupo === 'bebida' ? 'selected' : ''}>Bebida</option><option value="doce" ${ui.np.grupo === 'doce' ? 'selected' : ''}>Doce</option></select></div>
+      <div class="chips mb8">${CAT_ICONS.map(([k, l]) => `<button class="chip ${ui.np.cat === k ? 'on' : ''}" data-action="npCat" data-v="${k}">${icons[k]} ${l}</button>`).join('')}</div>
+      <button class="btn block" data-action="prodAdd">${icons.plus} Adicionar produto</button></div>`;
+}
+
+function syncCard({ sync, ui }) {
+  if (sync.configured) {
+    const st = sync.status;
+    const label = { ok: 'Sincronizado', pending: 'Aguardando', offline: 'Sem internet', error: 'Erro' }[st.state] || '';
+    return `<div class="card gold"><div class="h2">Sincronização (Google Sheets)</div>
+      <div class="note ${st.state === 'ok' ? 'ok' : st.state === 'error' ? 'err' : ''} mb12">${label}${st.last ? ` · última às ${timeHM(st.last)}` : ''}${st.pending ? ` · ${st.pending} alteração(ões) a enviar` : ''}${st.error ? `<br>${esc(st.error)}` : ''}</div>
+      <div class="muted mb12">Conectado a: ${esc(sync.url.slice(0, 48))}…</div>
+      <button class="btn block mb8" data-action="syncNow">Sincronizar agora</button>
+      <button class="btn block ghost" data-action="syncOff">Desconectar este aparelho</button></div>`;
+  }
+  return `<div class="card gold"><div class="h2">Sincronização (Google Sheets)</div>
+    <div class="muted mb12">Liga cozinha, expedição e painel — e é por ela que a página do cliente recebe o cardápio. Veja o passo a passo no LEIA-ME.</div>
+    <label class="field"><span class="lbl">Endereço do Apps Script (termina em /exec)</span><input class="inp" data-input="syncUrl" autocomplete="off" autocapitalize="off" value="${esc(ui.syncUrl || '')}"></label>
+    <label class="field"><span class="lbl">Senha</span><input class="inp" data-input="syncToken" autocomplete="off" autocapitalize="off" value="${esc(ui.syncToken || '')}"></label>
+    <button class="btn block" data-action="syncOn">Conectar e sincronizar</button></div>`;
+}
+
+function printCard({ printer }) {
+  const c = printer.config;
+  const seg = (name, val, opts) => `<div class="seg c${opts.length} row1 mb8">${opts.map(([v, l]) => `<button class="chip ${val === v ? 'on' : ''}" data-action="${name}" data-v="${v}">${l}</button>`).join('')}</div>`;
+  return `<div class="card"><div class="h2">Impressão (cupom térmico)</div>
+    <div class="muted mb12">Impressora térmica de 80 mm (ex.: Bematech MP-4200 TH). Ligue a impressão automática no aparelho que fica perto da impressora.</div>
+    <div class="h3" style="margin-top:0">Imprimir sozinho pedidos novos</div>${seg('printAuto', c.auto ? 'on' : 'off', [['on', 'Ligado'], ['off', 'Desligado']])}
+    <div class="h3">Largura do papel</div>${seg('printWidth', c.width, [[80, '80 mm'], [58, '58 mm']])}
+    <div class="h3">Vias por pedido</div>${seg('printCopies', c.copies, [[1, '1 via'], [2, '2 vias (cozinha + entrega)']])}
+    <button class="btn block ghost" data-action="printTest">Imprimir cupom de teste</button></div>`;
+}
+
+const fld = (label, key, value, extra = '') => `<label class="field"><span class="lbl">${label}</span><input class="inp" data-change="cfg" data-k="${key}" value="${esc(value)}" autocomplete="off" ${extra}></label>`;
+
+export const clienteUrl = () => new URL('c/', location.href).href;
+export const saudacao = (nome, url) => `Olá! 😊 Bem-vindo ao ${nome}.\nFaça seu pedido de marmita pelo link e pague por Pix:\n${url}\n\nSe preferir, é só responder esta mensagem com o seu pedido.`;
+
+function loja({ s, sync, online }) {
+  const c = s.config;
+  const url = clienteUrl();
+  const st = online.status;
+  const cfgLine = sync.configured ? `export default { scriptUrl: '${sync.url}' };` : '';
+  return `<div class="card"><div class="h2">Dados do restaurante</div>
+      ${fld('Nome', 'nome', c.nome)}
+      ${fld('WhatsApp que recebe os comprovantes (com DDD)', 'whatsapp', c.whatsapp, 'inputmode="tel"')}
+      ${fld('Chave Pix (CPF, CNPJ, e-mail, celular com +55 ou aleatória)', 'pixChave', c.pixChave, 'autocapitalize="off"')}
+      ${fld('Nome do recebedor no Pix', 'pixNome', c.pixNome)}
+      ${fld('Cidade do recebedor', 'pixCidade', c.pixCidade)}
+      ${fld('Recado no topo da página (opcional)', 'aviso', c.aviso)}
+      <div class="h3">Página de pedido</div>
+      <div class="seg c2 row1">${[[true, 'Aberta'], [false, 'Fechada']].map(([v, l]) => `<button class="chip ${c.aberto === v ? 'on' : ''}" data-action="cfgAberto" data-v="${v}">${l}</button>`).join('')}</div>
+      ${c.pixChave ? '' : '<div class="note mt8">Sem chave Pix, a página não mostra o Pix. Preencha acima.</div>'}</div>
+    <div class="card gold"><div class="h2">Receber pedidos online neste aparelho</div>
+      <div class="muted mb12">Ligue só no aparelho que fica perto da impressora (um só!). Ele busca os pedidos dos clientes a cada 15 segundos e imprime sozinho, se a impressão automática estiver ligada (aba Dados). Deixe esta janela aberta.</div>
+      <div class="seg c2 row1 mb8">${[[true, 'Ligado'], [false, 'Desligado']].map(([v, l]) => `<button class="chip ${online.on === v ? 'on' : ''}" data-action="onlineSet" data-v="${v}">${l}</button>`).join('')}</div>
+      ${!sync.configured ? '<div class="note err">Conecte a sincronização primeiro (aba Dados).</div>' : ''}
+      ${online.on && sync.configured ? `<div class="note ${st.error ? 'err' : 'ok'}">${st.error ? esc(st.error) : `Verificando pedidos${st.last ? ` · última busca às ${timeHM(st.last)}` : ''} · ${st.total} recebido(s) nesta sessão`}</div>` : ''}
+      ${st.failed.length ? `<div class="note err mt8">Não consegui importar: ${st.failed.map((f) => `${esc(f.ref)} (${esc(f.error)})`).join('; ')}</div>` : ''}</div>
+    <div class="card"><div class="h2">Link para o cliente</div>
+      <div class="muted mb8">Envie este link (ou deixe na mensagem automática do WhatsApp):</div>
+      <div class="note blue mb8" style="word-break:break-all">${esc(url)}</div>
+      <button class="btn block mb8" data-action="copy" data-text="${esc(url)}">${icons.copy} Copiar link</button>
+      <div class="h3">Mensagem automática do WhatsApp Business</div>
+      <div class="note mb8" style="white-space:pre-wrap">${esc(saudacao(c.nome, url))}</div>
+      <button class="btn block ghost mb12" data-action="copy" data-text="${esc(saudacao(c.nome, url))}">${icons.copy} Copiar mensagem</button>
+      <div class="h3">Ligação da página com a planilha</div>
+      <div class="muted mb8">No arquivo <b>c/config.js</b> do projeto, deixe exatamente esta linha (e publique de novo no GitHub):</div>
+      ${cfgLine ? `<div class="note" style="word-break:break-all">${esc(cfgLine)}</div><button class="btn block ghost mt8" data-action="copy" data-text="${esc(cfgLine)}">${icons.copy} Copiar linha</button>` : '<div class="note err">Conecte a sincronização para ver a linha.</div>'}</div>`;
+}
+
+function licenseCard({ license, ui }) {
+  const st = license.status();
+  const label = { trial: 'Período de teste', active: 'Licença ativa', expired: 'Licença vencida' }[st.state];
+  return `<div class="card"><div class="h2">Licença</div>
+    <div class="note ${st.state === 'expired' ? 'err' : 'ok'} mb12">${label} · válida até ${dateBR(st.until)} (${st.daysLeft} dia${st.daysLeft === 1 ? '' : 's'})</div>
+    <label class="field"><span class="lbl">Chave de ativação</span><input class="inp" data-input="licKey" autocomplete="off" autocapitalize="characters" placeholder="OLV-AAAAMMDD-XXXXXX" value="${esc(ui.licKey || '')}"></label>
+    <button class="btn block" data-action="licOn">Ativar chave</button></div>`;
+}
+
+function config(ctx) {
+  return `${syncCard(ctx)}${printCard(ctx)}${licenseCard(ctx)}<div class="card"><div class="h2">Backup</div><div class="muted mb12">Os dados ficam neste aparelho. Faça backup com frequência e leve-o a outro aparelho se precisar.</div>
+      <button class="btn block ghost mb8" data-action="exportJson">${icons.download} Baixar backup (.json)</button>
+      <div class="btn block ghost file-btn mb8">${icons.upload} Restaurar backup<input type="file" accept=".json,application/json" data-change="importJson"></div>
+      <button class="btn block ghost" data-action="exportCsv">${icons.download} Baixar vendas (.csv para Excel)</button></div>
+    <div class="card"><div class="h2">Testes</div>
+      <button class="btn block gold mb8" data-action="demo">Carregar dados de demonstração</button>
+      <button class="btn block danger" data-action="resetOp">Apagar vendas e pedidos (testes)</button></div>`;
+}
+
+function download(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement('a');
+  a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export default {
+  render(ctx) {
+    const { ui } = ctx;
+    ui.tab = ui.tab || 'resumo';
+    const body = { resumo, cardapio, precos, produtos, loja, config }[ui.tab](ctx);
+    return {
+      kicker: 'PAINEL DO DONO', title: 'Gestão', back: true,
+      body: `<div class="tabs" style="overflow-x:auto">${TABS.map(([k, l]) => `<button class="${ui.tab === k ? 'on' : ''}" data-action="ptab" data-v="${k}" style="flex:none;padding:0 12px">${l}</button>`).join('')}</div>${body}`,
+    };
+  },
+  actions: {
+    ptab({ ui }, el) { ui.tab = el.dataset.v; },
+    period({ ui }, el) { ui.period = el.dataset.v; },
+    menuDay({ ui }, el) { ui.day = el.dataset.v; },
+    menuAdd({ store, ui, toast }, el) {
+      const list = el.dataset.list;
+      const r = store.menuAdd(ui.day, list, ui['add_' + list]);
+      if (!r.ok) { toast(r.error, 'err'); return false; }
+      ui['add_' + list] = '';
+    },
+    menuFei({ store, ui, s }, el) {
+      const d = s.menu[ui.day].dishes.find((x) => x.id === el.dataset.id);
+      store.menuUpdate(ui.day, 'dishes', d.id, { tipo: d.tipo === 'feijoada' ? 'normal' : 'feijoada' });
+    },
+    menuUp({ store, ui }, el) { store.menuMove(ui.day, el.dataset.list, el.dataset.id, -1); },
+    menuDown({ store, ui }, el) { store.menuMove(ui.day, el.dataset.list, el.dataset.id, 1); },
+    async menuDel({ store, ui, ask }, el) {
+      if (await ask({ title: 'Remover do cardápio?', text: 'Isto não afeta pedidos já lançados.', ok: 'Remover', danger: true })) store.menuRemove(ui.day, el.dataset.list, el.dataset.id);
+    },
+    npCat({ ui }, el) { ui.np.cat = el.dataset.v; },
+    prodAdd({ store, ui, toast }) {
+      const price = parseMoney(ui.np.price);
+      if (Number.isNaN(price)) { toast('Informe o preço', 'err'); return false; }
+      const r = store.addProduct({ name: ui.np.name, price, grupo: ui.np.grupo, cat: ui.np.cat });
+      if (!r.ok) { toast(r.error, 'err'); return false; }
+      ui.np = null; toast('Produto adicionado', 'ok');
+    },
+    async prodDel({ store, ask }, el) {
+      if (await ask({ title: 'Remover produto?', text: 'Vendas já registradas não mudam.', ok: 'Remover', danger: true })) store.removeProduct(el.dataset.id);
+    },
+    exportJson({ store, toast }) { download(`oliveiras-backup-${new Date().toISOString().slice(0, 10)}.json`, store.exportJSON(), 'application/json'); toast('Backup baixado', 'ok'); return false; },
+    exportCsv({ store, toast }) { download(`oliveiras-vendas-${new Date().toISOString().slice(0, 10)}.csv`, store.ledgerCSV(), 'text/csv;charset=utf-8'); toast('Planilha baixada', 'ok'); return false; },
+    syncOn({ sync, ui, toast }) {
+      const r = sync.setConfig(ui.syncUrl, ui.syncToken);
+      if (!r.ok) { toast(r.error, 'err'); return false; }
+      toast('Conectando…');
+      sync.syncNow().then((x) => { toast(x.ok ? 'Sincronizado!' : x.error, x.ok ? 'ok' : 'err'); window.dispatchEvent(new Event('hashchange')); });
+    },
+    syncNow({ sync, toast }) {
+      toast('Sincronizando…');
+      sync.syncNow().then((x) => { toast(x.ok ? 'Sincronizado!' : x.error, x.ok ? 'ok' : 'err'); window.dispatchEvent(new Event('hashchange')); });
+      return false;
+    },
+    async syncOff({ sync, ask, toast }) {
+      if (await ask({ title: 'Desconectar?', text: 'Este aparelho deixa de enviar e receber. Os dados dele e da planilha continuam.', ok: 'Desconectar', danger: true })) { sync.clear(); toast('Desconectado'); }
+    },
+    cfgAberto({ store, toast }, el) { const r = store.setConfig({ aberto: el.dataset.v === 'true' }); if (!r.ok) toast(r.error, 'err'); },
+    onlineSet({ online, sync, toast }, el) {
+      if (el.dataset.v === 'true' && !sync.configured) { toast('Conecte a sincronização primeiro', 'err'); return false; }
+      online.set(el.dataset.v === 'true');
+    },
+    copy({ toast }, el) {
+      const text = el.dataset.text;
+      const done = () => toast('Copiado!', 'ok');
+      if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done, () => toast('Não consegui copiar', 'err'));
+      else toast('Não consegui copiar', 'err');
+      return false;
+    },
+    licOn({ license, ui, toast }) {
+      const r = license.activate(ui.licKey);
+      toast(r.ok ? 'Licença ativada!' : r.error, r.ok ? 'ok' : 'err');
+      if (r.ok) ui.licKey = '';
+    },
+    printAuto({ printer }, el) { printer.set({ auto: el.dataset.v === 'on' }); },
+    printWidth({ printer }, el) { printer.set({ width: Number(el.dataset.v) }); },
+    printCopies({ printer }, el) { printer.set({ copies: Number(el.dataset.v) }); },
+    printTest({ printer, toast }) { printer.printTest(); toast('Enviado para a impressora'); return false; },
+    async demo({ store, ask, toast }) {
+      if (await ask({ title: 'Carregar demonstração?', text: 'Adiciona vendas, pedidos e motoboys de exemplo. Use "Apagar vendas e pedidos" depois.', ok: 'Carregar' })) {
+        loadDemo(store); toast('Dados de demonstração carregados', 'ok');
+      }
+    },
+    async resetOp({ store, ask, toast }) {
+      if (await ask({ title: 'Apagar vendas e pedidos?', text: 'Preços, cardápio, produtos e motoboys ficam. Não dá para desfazer.', ok: 'Apagar tudo', danger: true })) {
+        store.resetOperational(); toast('Dados de teste apagados');
+      }
+    },
+  },
+  inputs: {
+    add_dishes({ ui }, el) { ui.add_dishes = el.value; return false; },
+    add_acomp({ ui }, el) { ui.add_acomp = el.value; return false; },
+    licKey({ ui }, el) { ui.licKey = el.value; return false; },
+    syncUrl({ ui }, el) { ui.syncUrl = el.value; return false; },
+    syncToken({ ui }, el) { ui.syncToken = el.value; return false; },
+    npName({ ui }, el) { ui.np.name = el.value; return false; },
+    npPrice({ ui }, el) { ui.np.price = el.value; return false; },
+  },
+  changes: {
+    cfg({ store, toast }, el) {
+      const r = store.setConfig({ [el.dataset.k]: el.value });
+      toast(r.ok ? 'Salvo' : r.error, r.ok ? 'ok' : 'err');
+    },
+    price({ store, toast }, el) {
+      const c = parseMoney(el.value);
+      if (Number.isNaN(c)) { toast('Valor inválido', 'err'); return; }
+      const r = store.setPrice(el.dataset.path, c);
+      toast(r.ok ? 'Preço salvo' : r.error, r.ok ? 'ok' : 'err');
+    },
+    menuName({ store, ui, toast }, el) { const r = store.menuUpdate(ui.day, el.dataset.list, el.dataset.id, { name: el.value }); if (!r.ok) toast(r.error, 'err'); },
+    menuCopy({ store, ui, toast }, el) { if (!el.value) return; const r = store.menuCopy(el.value, ui.day); toast(r.ok ? 'Cardápio copiado' : r.error, r.ok ? 'ok' : 'err'); },
+    prodName({ store, toast }, el) { const r = store.updateProduct(el.dataset.id, { name: el.value }); if (!r.ok) toast(r.error, 'err'); },
+    prodPrice({ store, toast }, el) {
+      const c = parseMoney(el.value);
+      if (Number.isNaN(c)) { toast('Preço inválido', 'err'); return; }
+      const r = store.updateProduct(el.dataset.id, { price: c }); toast(r.ok ? 'Preço salvo' : r.error, r.ok ? 'ok' : 'err');
+    },
+    prodGrupo({ store }, el) { store.updateProduct(el.dataset.id, { grupo: el.value }); },
+    npGrupo({ ui }, el) { ui.np.grupo = el.value; },
+    importJson({ store, toast }, el) {
+      const f = el.files?.[0]; if (!f) return false;
+      f.text().then((t) => { const r = store.importJSON(t); toast(r.ok ? 'Backup restaurado' : r.error, r.ok ? 'ok' : 'err'); window.dispatchEvent(new Event('hashchange')); });
+      return false;
+    },
+  },
+};

@@ -1,0 +1,11 @@
+{
+  "name": "oliveiras-gestao",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Oliveira's Delivery v2.0 — pedidos online, cozinha, expedição e painel (PWA, custo zero)",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "serve": "python3 -m http.server 8080"
+  }
+}
