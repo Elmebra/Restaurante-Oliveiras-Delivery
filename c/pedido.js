@@ -8,6 +8,8 @@ import config from './config.js';
 const LS_CLIENTE = 'oliveiras2.cliente';
 const LS_ULTIMO = 'oliveiras2.ultimo';
 const LS_SALVAR = 'oliveiras2.salvar';
+const LS_PEDIDO = 'oliveiras2.pedido'; // pedido em andamento (para acompanhar mesmo depois de fechar a página)
+const ACOMPANHA_MS = 18 * 3600 * 1000;
 
 const $app = document.getElementById('app');
 const $toast = document.getElementById('toast');
@@ -28,7 +30,8 @@ const st = {
   bebidas: {},
   cur: freshCur(),
   sending: false,
-  result: null,
+  order: null, // pedido em andamento: { id, ref, total, pagamento, tipo, nome, ts, s, pix, at, fin, dismissed }
+  trackErr: false,
   nonce: '',
   form: {
     nome: saved.nome || '', telefone: saved.telefone || '', rua: saved.rua || '', numero: saved.numero || '',
@@ -95,6 +98,32 @@ function viewError() {
     <button class="btn" data-a="reload">Tentar de novo</button></div></main>`;
 }
 
+const FLOW = {
+  entrega: [['recebido', 'Pedido recebido'], ['preparo', 'Em preparo'], ['pronto', 'Pronto'], ['saiu', 'Saiu para entrega'], ['entregue', 'Entregue']],
+  retirada: [['recebido', 'Pedido recebido'], ['preparo', 'Em preparo'], ['pronto_retirada', 'Pronto para retirar'], ['retirado', 'Retirado']],
+};
+const STATUS_TXT = {
+  recebido: { t: 'Recebemos o seu pedido', d: 'Já estamos conferindo. Esta tela atualiza sozinha.' },
+  preparo: { t: 'Sua marmita está sendo preparada', d: 'Assim que ficar pronta, avisamos aqui.' },
+  pronto: { t: 'Pronto! Aguardando o motoboy', d: 'Já já ele sai com o seu pedido.' },
+  pronto_retirada: { t: 'Pronto! Pode vir retirar', d: 'Seu pedido está esperando no balcão.' },
+  saiu: { t: '🛵 Saiu para entrega!', d: 'Fique de olho no portão e no telefone.' },
+  entregue: { t: 'Entregue. Bom apetite!', d: '' },
+  retirado: { t: 'Retirado. Bom apetite!', d: '' },
+  cancelado: { t: 'Pedido cancelado', d: 'Qualquer dúvida, fale com o restaurante pelo WhatsApp.' },
+};
+const hm = (ms) => (ms ? new Date(ms).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '');
+
+function viewStatus(o) {
+  const code = STATUS_TXT[o.s] ? o.s : 'recebido';
+  const info = STATUS_TXT[code];
+  const flow = FLOW[o.tipo] || FLOW.entrega;
+  const idx = flow.findIndex(([k]) => k === code);
+  const steps = code === 'cancelado' ? '' : `<ol class="steps">${flow.map(([k, l], i) => `<li class="${i < idx ? 'done' : i === idx ? 'now' : ''}"><span class="dt"></span>${esc(l)}${i === idx && o.at && (code === 'saiu' || code === 'entregue' || code === 'retirado') ? ` <small>às ${hm(o.at)}</small>` : ''}</li>`).join('')}</ol>`;
+  return `<section class="card status ${code === 'saiu' ? 'hot' : ''} ${code === 'cancelado' ? 'bad' : ''}"><h2>${info.t}</h2>${info.d ? `<p class="muted">${info.d}</p>` : ''}${steps}
+    ${st.trackErr && !o.fin ? '<p class="muted small">Sem conexão agora — tentando atualizar…</p>' : ''}</section>`;
+}
+
 function viewMenu() {
   const d = st.data;
   const c = st.cur;
@@ -104,6 +133,8 @@ function viewMenu() {
   const ultimo = lsGet(LS_ULTIMO, null);
   const repetir = ultimo?.itens?.length && ultimo.itens.every((it) => dishOf(it.dish))
     ? `<button class="btn ghost block" data-a="repeat">↻ Pedir o mesmo de novo (${esc(ultimo.itens.map((i) => itemLabel(i)).join(' + ').slice(0, 60))})</button>` : '';
+  const banner = st.order && !st.order.fin && st.order.dismissed
+    ? `<button class="note blue block track" data-a="track">Seu pedido <b>${esc(st.order.ref)}</b>: ${esc(STATUS_TXT[st.order.s || 'recebido'].t)} — toque para acompanhar</button>` : '';
   const cartHTML = st.cart.map((it, i) => `<div class="line"><div class="grow"><b>${esc(itemLabel(it))}</b>${it.acomp.length ? `<div class="muted">+ ${esc(it.acomp.join(', '))}</div>` : ''}</div>
     <b>${money(itemPrice(it))}</b><button class="x" data-a="rm" data-i="${i}" aria-label="Remover">×</button></div>`).join('');
   const drinks = d.products.length ? `<section class="card"><h2>Bebidas e doces</h2><div class="prods">${d.products.map((p) => `<div class="prod ${st.bebidas[p.id] ? 'has' : ''}">
@@ -111,6 +142,7 @@ function viewMenu() {
       <div class="step"><button data-a="bdec" data-id="${esc(p.id)}" aria-label="Menos">−</button><span>${st.bebidas[p.id] || 0}</span><button data-a="binc" data-id="${esc(p.id)}" aria-label="Mais">+</button></div></div>`).join('')}</div></section>` : '';
   return `${header()}<main>
     ${d.aviso ? `<div class="note">${esc(d.aviso)}</div>` : ''}
+    ${banner}
     ${repetir}
     <section class="card"><h2>1 · Escolha o prato</h2>
       ${d.menu.dishes.map((x) => `<button class="dish ${c.dish === x.name ? 'on' : ''}" data-a="dish" data-v="${esc(x.name)}"><span class="dot"></span><span class="grow">${esc(x.name)}</span>${x.tipo === 'feijoada' ? '<span class="tag">feijoada</span>' : ''}</button>`).join('')}
@@ -165,22 +197,25 @@ function viewCheckout() {
 }
 
 function viewDone() {
-  const r = st.result;
+  const r = st.order;
   const d = st.data;
   const wa = waNumber();
-  const pix = r.pagamento === 'pix' ? pixPayload({ chave: d.pix.chave, nome: d.pix.nome, cidade: d.pix.cidade, valorCents: r.total, txid: r.ref }) : '';
+  const pixPend = r.pagamento === 'pix' && r.pix !== false && !r.fin && r.s !== 'cancelado';
+  const pix = pixPend ? pixPayload({ chave: d.pix.chave, nome: d.pix.nome, cidade: d.pix.cidade, valorCents: r.total, txid: r.ref }) : '';
   const msg = `Olá! Segue o comprovante do pedido ${r.ref} (${r.nome}) — ${money(r.total)}.`;
   return `${header()}<main>
-    <section class="card center"><div class="ok">✓</div><h2>Pedido enviado!</h2>
+    <section class="card center"><div class="ok">✓</div><h2>${r.fin ? 'Pedido' : 'Pedido enviado!'}</h2>
       <p>Seu código é</p><div class="code">${esc(r.ref)}</div><p class="muted">Total: <b>${money(r.total)}</b>${r.tipo === 'entrega' ? ' (com entrega)' : ' — retirada no restaurante'}</p></section>
+    ${r.id ? viewStatus(r) : ''}
+    ${r.pagamento === 'pix' && r.pix === false ? '<div class="note blue">✓ Pix confirmado pelo restaurante.</div>' : ''}
     ${pix ? `<section class="card"><h2>Pague com Pix</h2>
       <p class="muted">Valor exato: <b>${money(r.total)}</b>. Abra o app do seu banco, escolha <b>Pix copia e cola</b> e cole o código:</p>
       <textarea class="inp code-box" readonly rows="4" id="pixcode">${esc(pix)}</textarea>
       <button class="btn block" data-a="copypix">Copiar código Pix</button>
       <div class="note mt8">Depois de pagar, envie o <b>comprovante</b> para o WhatsApp do restaurante com o código <b>${esc(r.ref)}</b>. Seu pedido só sai depois que o comprovante chegar.</div>
       ${wa ? `<a class="btn block gold mt8" href="https://wa.me/${wa}?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener">Enviar comprovante pelo WhatsApp</a><p class="muted small">Na conversa, toque no clipe 📎 para anexar a imagem do comprovante.</p>` : ''}</section>`
-    : `<section class="card center"><p>Pagamento <b>${r.pagamento === 'dinheiro' ? 'em dinheiro' : 'no cartão'}</b> ${r.tipo === 'entrega' ? 'na entrega' : 'na retirada'}. Obrigado!</p></section>`}
-    ${r.pagamento === 'pix' && !pix ? '<div class="note err">O restaurante ainda não cadastrou a chave Pix. Fale com ele pelo WhatsApp.</div>' : ''}
+    : (r.pagamento === 'pix' ? '' : `<section class="card center"><p>Pagamento <b>${r.pagamento === 'dinheiro' ? 'em dinheiro' : 'no cartão'}</b> ${r.tipo === 'entrega' ? 'na entrega' : 'na retirada'}. Obrigado!</p></section>`)}
+    ${pixPend && !pix ? '<div class="note err">O restaurante ainda não cadastrou a chave Pix. Fale com ele pelo WhatsApp.</div>' : ''}
     ${wa ? `<a class="btn ghost block" href="https://wa.me/${wa}" target="_blank" rel="noopener">Falar com o restaurante</a>` : ''}
     <button class="btn ghost block mt8" data-a="again">Fazer outro pedido</button>
     </main>`;
@@ -193,6 +228,54 @@ function render() {
   window.scrollTo(0, y);
 }
 
+/* ---------- acompanhamento do pedido ---------- */
+function loadOrder() {
+  const o = lsGet(LS_PEDIDO, null);
+  if (!o || !o.ref || !o.id || Date.now() - (o.ts || 0) > ACOMPANHA_MS) { if (o) lsDel(LS_PEDIDO); return null; }
+  return o;
+}
+function saveOrder() { if (st.order) lsSet(LS_PEDIDO, st.order); else lsDel(LS_PEDIDO); }
+
+const FINAL = ['entregue', 'retirado', 'cancelado'];
+let pollTimer = null;
+let trackBusy = false;
+
+async function refreshStatus() {
+  const o = st.order;
+  if (!o || !o.id || o.fin || trackBusy || !config.scriptUrl) return;
+  trackBusy = true;
+  try {
+    const res = await fetch(`${config.scriptUrl}${config.scriptUrl.includes('?') ? '&' : '?'}action=status&id=${encodeURIComponent(o.id)}&t=${Date.now()}`, { cache: 'no-store' });
+    const r = await res.json();
+    if (!r.ok) throw new Error('status');
+    const before = JSON.stringify([o.s, o.pix, o.at, st.trackErr]);
+    st.trackErr = false;
+    if (r.s !== 'desconhecido' && r.s !== 'recebido') { o.s = r.s; o.pix = r.pix; o.at = r.at || 0; }
+    else if (!o.s) o.s = 'recebido';
+    if (FINAL.includes(o.s)) o.fin = true;
+    saveOrder();
+    if (JSON.stringify([o.s, o.pix, o.at, st.trackErr]) !== before) {
+      if (o.s === 'saiu') { toast('Seu pedido saiu para entrega! 🛵', 'ok'); try { navigator.vibrate?.([200, 100, 200]); } catch { /* sem vibração */ } }
+      else if (o.s === 'pronto_retirada') toast('Seu pedido está pronto para retirar!', 'ok');
+      if (st.view === 'done' || st.view === 'menu') render();
+    }
+  } catch {
+    if (!st.trackErr) { st.trackErr = true; if (st.view === 'done') render(); }
+  } finally {
+    trackBusy = false;
+    if (st.order?.fin) stopTracking();
+  }
+}
+function stopTracking() { clearInterval(pollTimer); pollTimer = null; }
+function startTracking() {
+  stopTracking();
+  if (!st.order || !st.order.id || st.order.fin) return;
+  refreshStatus();
+  pollTimer = setInterval(() => { if (!document.hidden) refreshStatus(); }, 20000);
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshStatus(); });
+window.addEventListener('online', refreshStatus);
+
 /* ---------- servidor ---------- */
 async function loadMenu() {
   st.view = 'loading'; render();
@@ -203,6 +286,7 @@ async function loadMenu() {
     if (!data.ok) throw new Error(data.error || 'indisponível');
     st.data = data;
     st.view = data.aberto ? 'menu' : 'closed';
+    if (st.order && !st.order.fin && !st.order.dismissed) st.view = 'done'; // pedido em andamento: abre direto o acompanhamento
   } catch {
     st.err = navigator.onLine === false ? 'Você está sem internet.' : 'Verifique sua conexão e tente de novo.';
     st.view = 'error';
@@ -248,7 +332,8 @@ async function send() {
     const res = await fetch(config.scriptUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action: 'pedido', order: formOrder() }) });
     const r = await res.json();
     if (!r.ok) { toast(r.error || 'Não foi possível enviar.', 'err'); return; }
-    st.result = { ref: r.ref, total: r.total, pagamento: st.form.pagamento, tipo: st.form.tipo, nome: st.form.nome.trim() };
+    st.order = { id: r.id || '', ref: r.ref, total: r.total, pagamento: st.form.pagamento, tipo: st.form.tipo, nome: st.form.nome.trim(), ts: Date.now(), s: 'recebido', fin: false };
+    if (r.id) saveOrder(); else lsDel(LS_PEDIDO); // servidor antigo (sem acompanhamento): não guarda
     // lembra do pedido para repetir e, se o cliente quiser, dos dados de entrega
     lsSet(LS_ULTIMO, { itens: st.cart, bebidas: st.bebidas });
     lsSet(LS_SALVAR, st.form.salvar);
@@ -258,6 +343,7 @@ async function send() {
     } else lsDel(LS_CLIENTE);
     st.nonce = '';
     st.view = 'done';
+    startTracking();
   } catch {
     toast('Sem conexão. Seu pedido NÃO foi enviado — tente de novo.', 'err');
   } finally {
@@ -307,7 +393,11 @@ document.addEventListener('click', (e) => {
     if (navigator.clipboard?.writeText) navigator.clipboard.writeText(t.value).then(done, () => { t.select(); toast('Selecione e copie o código.', 'err'); });
     else { t.select(); document.execCommand?.('copy'); done(); }
     return;
-  } else if (a === 'again') { st.cart = []; st.bebidas = {}; st.cur = freshCur(); st.form.pagamento = ''; st.form.troco = ''; st.form.obs = ''; st.result = null; loadMenu(); return; }
+  } else if (a === 'again') {
+    st.cart = []; st.bebidas = {}; st.cur = freshCur(); st.form.pagamento = ''; st.form.troco = ''; st.form.obs = '';
+    if (st.order) { if (st.order.fin || !st.order.id) st.order = null; else st.order.dismissed = true; saveOrder(); }
+    st.view = 'menu'; render(); window.scrollTo(0, 0); loadMenu(); return;
+  } else if (a === 'track') { st.order.dismissed = false; saveOrder(); st.view = 'done'; render(); window.scrollTo(0, 0); refreshStatus(); return; }
   render();
 });
 
@@ -323,5 +413,6 @@ document.addEventListener('change', (e) => {
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
 }
-loadMenu();
+st.order = loadOrder();
+loadMenu().then(startTracking);
 window.__pedido = { st, formOrder, total };

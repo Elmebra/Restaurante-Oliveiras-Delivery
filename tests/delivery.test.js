@@ -19,7 +19,7 @@ const memStorage = () => {
 function fakeServer({ token = 'segredo', now = () => Date.now(), dayKey = 'qua' } = {}) {
   const ctx = vm.createContext({ console });
   vm.runInContext(`${fs.readFileSync(new URL('../apps-script/Code.gs', import.meta.url), 'utf8')}
-    this.api = { mergeChanges_, dataFromTable_, buildCardapio_, validateOrder_, makeRef_ };`, ctx);
+    this.api = { mergeChanges_, dataFromTable_, buildCardapio_, validateOrder_, makeRef_, statusMap_, statusCode_ };`, ctx);
   const api = ctx.api;
   const table = new Map();
   const inbox = []; // { id, ref, status, order }
@@ -35,7 +35,7 @@ function fakeServer({ token = 'segredo', now = () => Date.now(), dayKey = 'qua' 
       const ref = api.makeRef_(Math.random, taken);
       const order = { ...v.order, id: `id${inbox.length + 1}`, ref, ts: now() };
       inbox.push({ id: order.id, ref, status: 'novo', order });
-      return { ok: true, ref, total: v.total, taxa: v.taxa };
+      return { ok: true, id: order.id, ref, total: v.total, taxa: v.taxa };
     }
     if (b.token !== token) return { ok: false, error: 'senha' };
     if (b.action === 'inbox') return { ok: true, orders: inbox.filter((x) => x.status === 'novo').map((x) => x.order) };
@@ -45,7 +45,7 @@ function fakeServer({ token = 'segredo', now = () => Date.now(), dayKey = 'qua' 
     return { ok: true, rev, changes: r.out };
   }
   return {
-    table, inbox, data,
+    table, inbox, data, api,
     fetchFn: async (url, init) => {
       if (!init) return respond(api.buildCardapio_(data(), now()));
       return respond(handle(JSON.parse(init.body)));
@@ -278,4 +278,108 @@ test('licença: ativar chave, não zerar o teste limpando o aparelho e publicar 
   await b.sync.syncNow(); await a.sync.syncNow();
   assert.equal(a.store.state.config.validade, ok.until);
   assert.equal(createLicense({ store: a.store, storage: memStorage(), now: () => now, secret }).status().state, 'active');
+});
+
+/* ---------- v2.1: acompanhamento do pedido pelo cliente ---------- */
+test('status do pedido acompanha cozinha -> pronto -> saiu -> entregue (e o Pix é um aviso à parte)', async () => {
+  const srv = fakeServer();
+  const dono = await openShop(srv);
+  dono.store.menuAdd('qua', 'dishes', 'Strogonoff x');
+  await dono.sync.syncNow();
+  const feito = srv.submit(pedidoCliente());
+  assert.match(feito.id, /^id\d+$/);
+  const online = createOnline({ store: dono.store, sync: dono.sync, storage: memStorage() });
+  online.set(true);
+  await new Promise((r) => setTimeout(r, 20));
+  const p = dono.store.state.pedidos.at(-1);
+  const agora = () => 1.8e12 + 3600e3;
+  const ver = async () => { await dono.sync.syncNow(); return srv.api.statusMap_(srv.table, agora())[feito.id]; };
+
+  let s = await ver();
+  assert.equal(s.s, 'preparo');
+  assert.equal(s.pix, true, 'Pix ainda sem comprovante');
+
+  for (const it of p.itens) dono.store.setItemReady(p.id, it.id, true);
+  assert.equal((await ver()).s, 'pronto');
+  dono.store.setPixOk(p.id, true);
+  dono.store.addMotoboy('Zeca');
+  dono.store.dispatch(p.id, dono.store.state.motoboys[0].id);
+  s = await ver();
+  assert.equal(s.s, 'saiu');
+  assert.equal(s.pix, false);
+  assert.ok(s.at > 0, 'traz a hora da saída');
+
+  // desfazer a saída volta para "pronto"
+  dono.store.undoDispatch(p.id);
+  assert.equal((await ver()).s, 'pronto');
+  dono.store.dispatch(p.id, dono.store.state.motoboys[0].id);
+  dono.store.markDelivered(p.id);
+  assert.equal((await ver()).s, 'entregue');
+  // nada de dados pessoais na resposta
+  assert.deepEqual(Object.keys(await ver()).sort(), ['at', 'pix', 's']);
+});
+
+test('status: retirada, cancelado e pedidos antigos/de balcão', async () => {
+  const srv = fakeServer();
+  const dono = await openShop(srv);
+  dono.store.menuAdd('qua', 'dishes', 'Strogonoff x');
+  await dono.sync.syncNow();
+  const feito = srv.submit(pedidoCliente({ tipo: 'retirada', endereco: null, pagamento: 'dinheiro' }));
+  const online = createOnline({ store: dono.store, sync: dono.sync, storage: memStorage() });
+  online.set(true);
+  await new Promise((r) => setTimeout(r, 20));
+  const p = dono.store.state.pedidos.at(-1);
+  for (const it of p.itens) dono.store.setItemReady(p.id, it.id, true);
+  await dono.sync.syncNow();
+  assert.equal(srv.api.statusMap_(srv.table, 1.8e12 + 1000)[feito.id].s, 'pronto_retirada');
+  dono.store.cancelPedido?.(p.id);
+  await dono.sync.syncNow();
+  const cancel = srv.api.statusMap_(srv.table, 1.8e12 + 1000)[feito.id];
+  if (dono.store.cancelPedido) assert.equal(cancel.s, 'cancelado');
+  // depois de 36 h o pedido sai do mapa
+  assert.equal(srv.api.statusMap_(srv.table, 1.8e12 + 37 * 3600e3)[feito.id], undefined);
+  // pedido de balcão (sem src online) nunca aparece
+  assert.equal(Object.keys(srv.api.statusMap_(srv.table, 1.8e12 + 1000)).length, 1);
+});
+
+test('servidor: consulta de status valida o código, usa cache e distingue recebido / desconhecido', () => {
+  const cacheData = {};
+  const sheets = {
+    Dados: [['k', 'u', 'rev', 'del', 'v'], ['pedidos:o1', 5, 1, false, JSON.stringify({ src: 'w-aaaaaaaaaaaaaaaa', ts: Date.now(), status: 'saiu', saiuAt: 123, tipo: 'entrega', pagamento: 'dinheiro', itens: [{ status: 'pronto' }] })]],
+    Pedidos_Online: [['id'], ['bbbbbbbbbbbbbbbb']],
+  };
+  const sheetOf = (rows) => ({ getLastRow: () => rows.length, getRange: (r, c, n) => ({ getValues: () => rows.slice(r - 1, r - 1 + n).map((x) => x.slice(c - 1)) }) });
+  let reads = 0;
+  const ss = { getSheetByName: (n) => { if (n === 'Dados') reads += 1; return sheets[n] ? sheetOf(sheets[n]) : null; } };
+  const ctx = vm.createContext({
+    console,
+    CacheService: { getScriptCache: () => ({ get: (k) => cacheData[k] ?? null, put: (k, v) => { cacheData[k] = v; } }) },
+  });
+  vm.runInContext(`${fs.readFileSync(new URL('../apps-script/Code.gs', import.meta.url), 'utf8')}\nthis.f = orderStatus_;`, ctx);
+  const f = (id) => JSON.parse(JSON.stringify(ctx.f(ss, id)));
+  assert.equal(f('xyz').ok, false);
+  assert.equal(f('../../etc/passwd0').ok, false);
+  assert.deepEqual(f('aaaaaaaaaaaaaaaa'), { ok: true, s: 'saiu', pix: false, at: 123 });
+  assert.equal(f('bbbbbbbbbbbbbbbb').s, 'recebido');
+  assert.equal(f('cccccccccccccccc').s, 'desconhecido');
+  assert.equal(reads, 1, 'a planilha foi lida uma vez só; o resto veio do cache');
+});
+
+test('v2.1: raiz do site abre o cliente e o app do dono fica em pasta própria, com caminhos que funcionam', () => {
+  const root = new URL('../', import.meta.url);
+  const rootIndex = fs.readFileSync(new URL('index.html', root), 'utf8');
+  assert.ok(rootIndex.includes('url=c/'));
+  assert.ok(!rootIndex.includes('app.js'));
+  const dirs = fs.readdirSync(root).filter((d) => d.startsWith('gestao-'));
+  assert.equal(dirs.length, 1);
+  const g = new URL(`${dirs[0]}/`, root);
+  const html = fs.readFileSync(new URL('index.html', g), 'utf8');
+  assert.ok(html.includes('noindex'));
+  for (const m of html.matchAll(/(?:href|src)="(\.\.\/[^"]+)"/g)) assert.ok(fs.existsSync(new URL(m[1], g)), m[1]);
+  const man = JSON.parse(fs.readFileSync(new URL('manifest.webmanifest', g), 'utf8'));
+  for (const i of man.icons) assert.ok(fs.existsSync(new URL(i.src, g)), i.src);
+  const sw = fs.readFileSync(new URL('sw.js', g), 'utf8');
+  for (const m of sw.matchAll(/'(\.\.\/[^']+)'/g)) assert.ok(fs.existsSync(new URL(m[1], g)), m[1]);
+  // o link do cliente mostrado no painel aponta para ../c/
+  assert.ok(fs.readFileSync(new URL('js/screens/painel.js', root), 'utf8').includes("new URL('../c/'"));
 });

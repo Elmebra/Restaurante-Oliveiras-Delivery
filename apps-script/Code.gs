@@ -1,10 +1,11 @@
 /**
- * Oliveira's Delivery v2.0 — servidor (Google Apps Script ligado a uma planilha).
+ * Oliveira's Delivery v2.1 — servidor (Google Apps Script ligado a uma planilha).
  *
- * Faz três coisas:
+ * Faz quatro coisas:
  *   1) Sincroniza os aparelhos do restaurante (cozinha, expedição, painel) — com senha (TOKEN).
  *   2) Entrega o cardápio de hoje para a página de pedido dos clientes — público, só leitura.
- *   3) Recebe os pedidos feitos pelos clientes — público, mas validado e limitado — e os guarda
+ *   3) Informa ao cliente em que pé está o pedido dele (preparo, saiu para entrega...) — público, só pelo código secreto do pedido.
+ *   4) Recebe os pedidos feitos pelos clientes — público, mas validado e limitado — e os guarda
  *      na aba "Pedidos_Online" até o aparelho da cozinha buscá-los (e imprimir).
  *
  * Abas criadas automaticamente:
@@ -17,7 +18,7 @@
  */
 
 // TROQUE por uma senha sua (a mesma será digitada no app). Não use espaços.
-var TOKEN = 'TROQUE-ESTA-SENHA';
+var TOKEN = 'PATRÃO10pix';
 
 var HEADER = ['k', 'u', 'rev', 'del', 'v'];
 var INBOX_HEADER = ['id', 'ref', 'ts', 'status', 'json', 'Cliente', 'Total (R$)'];
@@ -212,6 +213,37 @@ function validateOrder_(raw, data, nowMs) {
   };
 }
 
+/** Em que etapa o pedido está, do ponto de vista do cliente (o Pix pendente é um aviso à parte). */
+function statusCode_(p) {
+  if (p.status === 'cancelado') return 'cancelado';
+  if (p.status === 'entregue') return 'entregue';
+  if (p.status === 'retirado') return 'retirado';
+  if (p.status === 'saiu') return 'saiu';
+  var itens = p.itens || [];
+  var ready = itens.every(function (i) { return i.status === 'pronto'; });
+  if (!ready) return 'preparo';
+  return p.tipo === 'entrega' ? 'pronto' : 'pronto_retirada';
+}
+
+function pixPending_(p) {
+  return p.pagamento === 'pix' && !p.pixOk && p.status !== 'cancelado' && p.status !== 'entregue' && p.status !== 'retirado';
+}
+
+/** Mapa id-do-pedido-online -> situação, só com os pedidos das últimas 36 h. */
+function statusMap_(table, nowMs) {
+  var out = {};
+  live_(table, 'pedidos').forEach(function (p) {
+    if (!p.src || String(p.src).indexOf('w-') !== 0 || p.ts < nowMs - 36 * 3600000) return;
+    var done = p.status === 'entregue' || p.status === 'retirado';
+    out[String(p.src).slice(2)] = {
+      s: statusCode_(p),
+      pix: pixPending_(p),
+      at: p.status === 'saiu' ? (p.saiuAt || 0) : (done ? (p.entregueAt || 0) : 0),
+    };
+  });
+  return out;
+}
+
 var REF_CHARS_ = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function makeRef_(rand, taken) {
   for (var n = 0; n < 50; n++) {
@@ -232,6 +264,13 @@ function doGet(e) {
       var dayKey = DAY_BY_ISO_[Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), 'u')];
       var data = dataFromTable_(readTable_(ss), dayKey);
       return json_(buildCardapio_(data, Date.now()));
+    } catch (err) {
+      return json_({ ok: false, error: 'indisponível' });
+    }
+  }
+  if (action === 'status') {
+    try {
+      return json_(orderStatus_(SpreadsheetApp.getActiveSpreadsheet(), String(e.parameter.id || '')));
     } catch (err) {
       return json_({ ok: false, error: 'indisponível' });
     }
@@ -342,9 +381,37 @@ function submitOrder_(ss, raw) {
 
   cache.put(hourKey, String(perHour + 1), 3600);
   if (tel) cache.put(phoneKey, String(perPhone + 1), 600);
-  var out = { ok: true, ref: ref, total: v.total, taxa: v.taxa };
+  var out = { ok: true, id: id, ref: ref, total: v.total, taxa: v.taxa };
   if (nonce) cache.put('n' + nonce, JSON.stringify(out), 21600);
   return out;
+}
+
+/**
+ * Situação do pedido para a página do cliente. O código (id) tem 16 caracteres aleatórios que só o
+ * celular do cliente conhece; a resposta traz apenas a etapa — nunca nome, endereço ou valores.
+ * O mapa fica 10 s em cache para muitos clientes atualizando ao mesmo tempo não pesarem na planilha.
+ */
+function orderStatus_(ss, id) {
+  if (!/^[a-f0-9]{16}$/.test(id)) return { ok: false, error: 'código inválido' };
+  var cache = CacheService.getScriptCache();
+  var raw = cache.get('stmap');
+  var map;
+  if (raw) map = JSON.parse(raw);
+  else {
+    map = statusMap_(readTable_(ss), Date.now());
+    try { cache.put('stmap', JSON.stringify(map), 10); } catch (err) { /* grande demais: segue sem cache */ }
+  }
+  var hit = map[id];
+  if (hit) return { ok: true, s: hit.s, pix: hit.pix, at: hit.at };
+  // ainda não chegou na cozinha (o aparelho da impressora busca a cada 15 s)
+  var sh = ss.getSheetByName('Pedidos_Online');
+  if (sh && sh.getLastRow() > 1) {
+    var last = sh.getLastRow();
+    var from = Math.max(2, last - 400);
+    var ids = sh.getRange(from, 1, last - from + 1, 1).getValues();
+    for (var i = 0; i < ids.length; i++) if (String(ids[i][0]) === id) return { ok: true, s: 'recebido' };
+  }
+  return { ok: true, s: 'desconhecido' };
 }
 
 function readInbox_(ss) {

@@ -1,5 +1,5 @@
 // Service worker da página do cliente: abre rápido e mantém o visual; o cardápio e os preços SEMPRE vêm da internet.
-const VERSION = 'oliveiras-cliente-v1';
+const VERSION = 'oliveiras-cliente-v2';
 const SHELL = [
   './', './index.html', './pedido.js', './pedido.css', './config.js', './manifest.webmanifest',
   '../js/util.js', '../js/pricing.js', '../js/pix.js',

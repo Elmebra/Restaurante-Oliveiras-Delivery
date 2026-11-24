@@ -106,7 +106,7 @@ function printCard({ printer }) {
 
 const fld = (label, key, value, extra = '') => `<label class="field"><span class="lbl">${label}</span><input class="inp" data-change="cfg" data-k="${key}" value="${esc(value)}" autocomplete="off" ${extra}></label>`;
 
-export const clienteUrl = () => new URL('c/', location.href).href;
+export const clienteUrl = () => new URL('../c/', location.href).href;
 export const saudacao = (nome, url) => `Olá! 😊 Bem-vindo ao ${nome}.\nFaça seu pedido de marmita pelo link e pague por Pix:\n${url}\n\nSe preferir, é só responder esta mensagem com o seu pedido.`;
 
 function loja({ s, sync, online }) {

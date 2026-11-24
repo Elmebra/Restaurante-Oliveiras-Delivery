@@ -1,4 +1,4 @@
-# Oliveira's Delivery — v2.0
+# Oliveira's Delivery — v2.1
 
 Pedidos online de marmita e feijoada: o cliente abre um **link**, monta o pedido, paga por **Pix** (ou na entrega) e o pedido **sai impresso** na cozinha.
 O restaurante não muda a rotina interna: balança, comandas e caixa **não existem** nesta versão (estão na v1.0 "Salão Completo").
@@ -9,17 +9,23 @@ Cliente (link /c/) ──► Planilha Google (Apps Script) ──► aparelho da
         └── cardápio e preços ◄── Painel do dono ◄───────────────┘
 ```
 
+## Endereços (v2.1)
+- **Cliente:** `https://SEU-USUARIO.github.io/REPO/c/` (e a raiz `https://SEU-USUARIO.github.io/REPO/` já redireciona para ela).
+- **Restaurante (cozinha, expedição, painel):** `https://SEU-USUARIO.github.io/REPO/gestao-k7x2q9/` — pasta própria, fora do índice do Google (`noindex`). **Troque o nome da pasta `gestao-k7x2q9` por algo só seu** (qualquer nome sem espaços, ex. `gestao-m4q8x2`); tudo usa caminhos relativos, então basta renomear a pasta antes de enviar ao GitHub.
+- Isso esconde o endereço, **não é senha**: quem descobrir só vê um app vazio, sem dados (os dados ficam no aparelho e na planilha, protegida pela senha do Apps Script).
+
 ## O que o cliente vê (página `/c/`)
 1. Cardápio de hoje, tamanhos, acompanhamentos, bebidas.
 2. Dados de entrega (nome, telefone, rua, número, bairro…) — **ficam salvos no celular dele**, sem criar conta; no próximo pedido já vêm preenchidos e há o botão "Pedir o mesmo de novo".
 3. Forma de pagamento: **Pix** (mostra o *Pix copia e cola* com o valor exato), **dinheiro** (com troco) ou **cartão na entrega**.
 4. Depois de enviar: código do pedido (ex.: `WK7Q`) e botão para mandar o **comprovante do Pix pelo WhatsApp** do restaurante.
-5. A mensagem automática do WhatsApp com o link é configurada no próprio WhatsApp Business (passo 7).
+5. **Acompanhamento (v2.1):** a tela mostra em que etapa o pedido está — *Recebido → Em preparo → Pronto → Saiu para entrega → Entregue* (na retirada: *…→ Pronto para retirar → Retirado*). Atualiza sozinha a cada 20 s, avisa com vibração e mensagem quando sai para entrega e **continua valendo se o cliente fechar a página e abrir de novo** (por até 18 h, enquanto o pedido não for entregue). Também mostra "Pix confirmado" quando o restaurante marca o comprovante. A etapa vem do que a cozinha/expedição marcam no app; nada de dados pessoais trafega nessa consulta (só um código secreto do pedido).
+6. A mensagem automática do WhatsApp com o link é configurada no próprio WhatsApp Business (passo 7).
 
 ## Instalação (uma vez)
 ### 1) Hospedar (GitHub Pages)
-Crie/atualize o repositório e envie **TODO** o conteúdo desta pasta (`index.html` na raiz e a pasta `c/`). Settings > Pages > Deploy from a branch > main / (root).
-Endereços: app do restaurante `https://SEU-USUARIO.github.io/REPO/` · página do cliente `https://SEU-USUARIO.github.io/REPO/c/`.
+Crie/atualize o repositório e envie **TODO** o conteúdo desta pasta (`index.html` na raiz, `c/`, `css/`, `js/`, `icons/` e a pasta do app `gestao-…/`). Settings > Pages > Deploy from a branch > main / (root).
+Endereços: veja a seção "Endereços (v2.1)" acima.
 Ao enviar versão nova, aumente o número em `VERSION` no `sw.js` e em `c/sw.js`.
 
 ### 2) Planilha + servidor (Google Apps Script)
@@ -42,7 +48,7 @@ O botão **Aberta/Fechada** abre e fecha a página na hora.
 
 ### 6) Impressão automática (Bematech MP-4200 TH, USB)
 1. Instale o driver, deixe a impressora como **padrão** do Windows (papel 80 mm).
-2. Atalho do Chrome: `"C:\Program Files\Google\Chrome\Application\chrome.exe" --kiosk-printing --app=https://SEU-USUARIO.github.io/REPO/#/cozinha`
+2. Atalho do Chrome: `"C:\Program Files\Google\Chrome\Application\chrome.exe" --user-data-dir="C:\oliveiras-chrome" --kiosk-printing --app=https://SEU-USUARIO.github.io/REPO/gestao-k7x2q9/#/cozinha`
 3. Painel > Dados > Impressão: ligue "Imprimir sozinho pedidos novos". Painel > **Loja online**: ligue **"Receber pedidos online neste aparelho"**. Só **um** aparelho (o da impressora) deve ficar com isto ligado, e a janela precisa ficar aberta.
 4. Chegou pedido: toca um bipe, aparece na fila e o cupom sai. O cupom traz o **código**, os M-001…, endereço, forma de pagamento e "AGUARDANDO COMPROVANTE" quando é Pix.
 
@@ -71,9 +77,16 @@ O cupom é **comanda**, com a frase "NÃO É DOCUMENTO FISCAL". NFC-e/cupom fisc
 
 ## Testes
 `node --test tests/*.test.js` — regras, sincronização com vários aparelhos, servidor (Code.gs rodando de verdade), Pix (CRC), licença e o fluxo cliente → cozinha → cupom.
-Local: `python3 -m http.server 8080` → http://localhost:8080 (app) e http://localhost:8080/c/ (cliente; precisa do `scriptUrl` em `c/config.js`).
+Local: `python3 -m http.server 8080` → http://localhost:8080/gestao-k7x2q9/ (app) e http://localhost:8080/c/ (cliente; precisa do `scriptUrl` em `c/config.js`).
+
+## Atualizando da v2.0 para a v2.1
+1. **Apps Script:** abra o projeto, cole o novo `apps-script/Code.gs` por cima, **recoloque a sua senha na linha `var TOKEN`**, salve e vá em Implantar > Gerenciar implantações > lápis > **Nova versão** > Implantar. (O URL `/exec` continua o mesmo. Sem isso o acompanhamento não aparece, mas os pedidos seguem funcionando.)
+2. **GitHub:** envie a pasta nova por cima. Depois **apague no repositório** o arquivo antigo `manifest.webmanifest` da raiz (o `index.html` e o `sw.js` da raiz são substituídos). **Confira o `c/config.js`**: ele precisa continuar com o seu `scriptUrl` (não deixe o arquivo vazio da pasta).
+3. **Aparelhos do restaurante:** abra o novo endereço `…/gestao-…/` — os dados e a configuração (sincronização, impressão, licença) continuam, pois ficam no mesmo site. Refaça o atalho do Chrome da impressora com o endereço novo (e confira "Receber pedidos online"). Quem instalou o app na tela inicial do celular deve instalar de novo a partir do endereço novo.
+4. O `sw.js` da raiz da v2.1 apenas remove o app antigo em cache e se desliga.
 
 ## Versões
 - **v1.0 "Salão Completo"**: balança, comandas, caixa, cozinha, expedição, painel (pasta `oliveiras-v1.0-salao-completo`).
-- **v2.0 "Delivery"** (esta): só delivery/retirada com página de pedido, Pix, impressão automática, licença.
+- **v2.0 "Delivery"**: só delivery/retirada com página de pedido, Pix, impressão automática, licença.
+- **v2.1 "Delivery + Acompanhamento"** (esta): app do restaurante em endereço próprio e status do pedido na página do cliente.
 - **v3.0 (ideia)**: pagamento online (Pix/cartão por gateway com confirmação automática) e robô de conversa no WhatsApp pela API oficial.
